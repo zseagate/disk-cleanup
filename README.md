@@ -128,3 +128,7 @@ scripts/uninstall.sh      卸载
 scripts/offload-cache.sh  缓存迁移/迁回
 systemd/                  systemd 用户单元
 ```
+
+## License
+
+[MIT](LICENSE)
