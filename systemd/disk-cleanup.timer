@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly cleanup of regenerable caches under /home
+
+[Timer]
+OnBootSec=15min
+OnCalendar=Sun *-*-* 04:30:00
+RandomizedDelaySec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

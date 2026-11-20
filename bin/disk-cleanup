@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# disk-cleanup —— 定期清理可再生的缓存，防止小容量 /home 被缓存撑满。
+#
+# 只清理缓存与旧日志；不碰配置、书签/密码、聊天记录、项目文件、会话数据库。
+# 配置文件（可选）：${XDG_CONFIG_HOME:-$HOME/.config}/disk-cleanup/config
+#   DATA_MOUNT="/mnt/data"                 # 缓存卸载所在的挂载点，用于告警
+#   CACHE_ROOT="/mnt/data/disk-cleanup-cache"  # 软链目标必须位于此目录下（防误删）
+set -u
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/disk-cleanup/config"
+DATA_MOUNT=""
+CACHE_ROOT=""
+# shellcheck disable=SC1090
+[ -r "$CONFIG" ] && . "$CONFIG"
+
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}"
+LOG="$LOG_DIR/disk-cleanup.log"
+mkdir -p "$LOG_DIR"
+
+# 日志超过 1MB 时轮转
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+  mv -f "$LOG" "$LOG.1"
+fi
+
+log() { printf '%s %s\n' "$(date '+%F %T')" "$*" >>"$LOG"; }
+
+before=$(df --output=avail -B1 /home | tail -1)
+log "=== 开始清理 ==="
+if [ -n "$DATA_MOUNT" ] && ! mountpoint -q "$DATA_MOUNT" 2>/dev/null; then
+  log "警告：数据盘 $DATA_MOUNT 未挂载，已软链的缓存不可用"
+fi
+
+# 1) 已下载但未安装的更新包（安装完成后即无用）
+for d in "$HOME/.cache/@opencodedesktop-updater/pending" \
+         "$HOME/.cache/@opencode-aidesktop-updater/pending"; do
+  [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '*.deb' -mtime +1 -delete 2>/dev/null
+done
+
+# 2) pip / uv 缓存（可再生；uv 只清未引用的条目）
+find "$HOME/.cache/pip" -type f -mtime +30 -delete 2>/dev/null
+command -v uv >/dev/null 2>&1 && uv cache prune >>"$LOG" 2>&1
+
+# 3) 缩略图与着色器缓存（可再生）
+find "$HOME/.cache/thumbnails" -type f -mtime +14 -delete 2>/dev/null
+find "$HOME/.cache/mesa_shader_cache" -type f -mtime +30 -delete 2>/dev/null
+
+# 4) 浏览器磁盘缓存：仅在浏览器未运行时清理，避免破坏运行中的会话。
+#    缓存目录可能已软链到数据盘，此时只清链接目标里的内容，保留软链。
+clean_browser_cache() {
+  local dir="$1"; shift
+  local n running=0
+  for n in "$@"; do
+    if pgrep -x "$n" >/dev/null 2>&1; then running=1; break; fi
+  done
+  if [ "$running" = 1 ]; then
+    log "跳过 $dir（$n 运行中）"
+    return
+  fi
+  if [ -L "$dir" ]; then
+    local target
+    target=$(readlink "$dir")
+    case "$target" in
+      ""|"/")
+        log "警告：$dir 链接目标异常，跳过"
+        return
+        ;;
+    esac
+    # 仅允许清空 CACHE_ROOT 下的目标，避免配置错误导致误删
+    if [ -n "$CACHE_ROOT" ] && [ "${target#"$CACHE_ROOT"/}" = "$target" ]; then
+      log "警告：$dir 链接目标 $target 不在 $CACHE_ROOT 下，跳过"
+      return
+    fi
+    if [ -d "$target" ]; then
+      find "$target" -mindepth 1 -delete 2>/dev/null
+      log "已清理 $dir -> $target"
+    else
+      log "跳过 $dir（链接目标不存在，数据盘可能未挂载）"
+    fi
+  elif [ -d "$dir" ]; then
+    rm -rf "$dir"
+    log "已清理 $dir"
+  fi
+}
+clean_browser_cache "$HOME/.cache/google-chrome"  chrome google-chrome
+clean_browser_cache "$HOME/.cache/chromium"       chromium
+clean_browser_cache "$HOME/.cache/microsoft-edge" msedge microsoft-edge
+clean_browser_cache "$HOME/.cache/vivaldi"        vivaldi-bin vivaldi
+clean_browser_cache "$HOME/.cache/BraveSoftware"  brave brave-browser
+
+# Firefox 磁盘缓存在 ~/.cache/mozilla，运行中不动
+clean_browser_cache "$HOME/.cache/mozilla"        firefox-bin firefox
+
+# 5) 聊天软件缓存/旧日志（仅在未运行时清理）
+if ! pgrep -f -i 'DingTalk' >/dev/null 2>&1; then
+  rm -rf "$HOME/.config/DingTalk/cache" 2>/dev/null
+  find "$HOME/.config/DingTalk/log" -type f -mtime +7 -delete 2>/dev/null
+  log "已清理 DingTalk 缓存/旧日志"
+fi
+find "$HOME/.xwechat/log" "$HOME/.xwechat/crashinfo" -type f -mtime +7 -delete 2>/dev/null
+
+# 6) OpenCode / 应用旧日志
+find "$HOME/.local/share/opencode/log" -type f -mtime +7 -delete 2>/dev/null
+find "$LOG_DIR" -maxdepth 1 -type f -name '*.log.*' -mtime +30 -delete 2>/dev/null
+
+after=$(df --output=avail -B1 /home | tail -1)
+freed=$(( (after - before) / 1024 / 1024 ))
+log "=== 结束：本次释放 ${freed} MiB，/home 可用 $(( after / 1024 / 1024 )) MiB ==="
