@@ -28,7 +28,7 @@ Gradle、浏览器等重缓存迁到大容量数据盘（原路径保留软链�
 依赖：Linux、bash、systemd（用户实例）、`pgrep`、`find`、`df`。
 
 ```bash
-git clone git@github.com:<you>/disk-cleanup.git
+git clone https://github.com/zseagate/disk-cleanup.git
 cd disk-cleanup
 ./scripts/install.sh
 ```
